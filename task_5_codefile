@@ -1,0 +1,363 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from wordcloud import WordCloud
+import warnings
+warnings.filterwarnings('ignore')
+
+import re
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+from nltk.tokenize import word_tokenize
+
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, f1_score, precision_score, recall_score
+
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import LinearSVC
+from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
+
+nltk.download('stopwords', quiet=True)
+nltk.download('wordnet', quiet=True)
+nltk.download('punkt', quiet=True)
+nltk.download('omw-1.4', quiet=True)
+
+class ComplaintDataAnalyzer:
+    def _init_(self, data_path):
+        self.df = pd.read_csv(data_path)
+        self.category_mapping = {
+            'Credit reporting, repair, or other': 0,
+            'Credit reporting, credit repair services, or other personal consumer reports': 0,
+            'Debt collection': 1,
+            'Consumer Loan': 2,
+            'Mortgage': 3
+        }
+        
+    def load_and_prepare_data(self):
+        print("=" * 80)
+        print("INITIAL DATA EXPLORATION")
+        print("=" * 80)
+        print(f"\nDataset Shape: {self.df.shape}")
+        print(f"\nColumn Names:\n{self.df.columns.tolist()}")
+        print(f"\nFirst Few Rows:\n{self.df.head()}")
+        print(f"\nData Types:\n{self.df.dtypes}")
+        print(f"\nMissing Values:\n{self.df.isnull().sum()}")
+        return self.df
+    
+    def filter_categories(self):
+        print("\n" + "=" * 80)
+        print("FILTERING CATEGORIES")
+        print("=" * 80)
+        relevant_products = list(self.category_mapping.keys())
+        self.df = self.df[self.df['Product'].isin(relevant_products)]
+        self.df['Category'] = self.df['Product'].map(self.category_mapping)
+        print(f"\nFiltered Dataset Shape: {self.df.shape}")
+        print(f"\nCategory Distribution:\n{self.df['Category'].value_counts()}")
+        return self.df
+    
+    def perform_eda(self):
+        print("\n" + "=" * 80)
+        print("EXPLORATORY DATA ANALYSIS")
+        print("=" * 80)
+        plt.figure(figsize=(10, 6))
+        category_counts = self.df['Category'].value_counts()
+        plt.bar(category_counts.index, category_counts.values)
+        plt.xlabel('Category')
+        plt.ylabel('Count')
+        plt.title('Distribution of Complaint Categories')
+        plt.xticks([0, 1, 2, 3], ['Credit Reporting', 'Debt Collection', 'Consumer Loan', 'Mortgage'])
+        plt.tight_layout()
+        plt.savefig('category_distribution.png')
+        self.df['text_length'] = self.df['Consumer complaint narrative'].astype(str).apply(len)
+        self.df['word_count'] = self.df['Consumer complaint narrative'].astype(str).apply(lambda x: len(x.split()))
+        print(f"\nText Length Statistics:")
+        print(self.df['text_length'].describe())
+        print(f"\nWord Count Statistics:")
+        print(self.df['word_count'].describe())
+        plt.figure(figsize=(10, 6))
+        self.df.boxplot(column='word_count', by='Category', figsize=(10, 6))
+        plt.title('Word Count Distribution by Category')
+        plt.suptitle('')
+        plt.xlabel('Category')
+        plt.ylabel('Word Count')
+        plt.tight_layout()
+        plt.savefig('wordcount_by_category.png')
+        return self.df
+    
+    def create_wordclouds(self):
+        print("\n" + "=" * 80)
+        print("GENERATING WORD CLOUDS")
+        print("=" * 80)
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        axes = axes.ravel()
+        categories = {0: 'Credit Reporting', 1: 'Debt Collection', 2: 'Consumer Loan', 3: 'Mortgage'}
+        for idx, (cat_num, cat_name) in enumerate(categories.items()):
+            text = ' '.join(self.df[self.df['Category'] == cat_num]['Consumer complaint narrative'].astype(str))
+            wordcloud = WordCloud(width=800, height=400, background_color='white', colormap='viridis').generate(text)
+            axes[idx].imshow(wordcloud, interpolation='bilinear')
+            axes[idx].set_title(f'{cat_name} - Category {cat_num}', fontsize=14, fontweight='bold')
+            axes[idx].axis('off')
+        plt.tight_layout()
+        plt.savefig('wordclouds.png', dpi=300, bbox_inches='tight')
+    
+    def engineer_features(self):
+        print("\n" + "=" * 80)
+        print("FEATURE ENGINEERING")
+        print("=" * 80)
+        self.df['char_count'] = self.df['Consumer complaint narrative'].astype(str).apply(len)
+        self.df['word_count'] = self.df['Consumer complaint narrative'].astype(str).apply(lambda x: len(x.split()))
+        self.df['avg_word_length'] = self.df['char_count'] / (self.df['word_count'] + 1)
+        self.df['stopword_count'] = self.df['Consumer complaint narrative'].astype(str).apply(
+            lambda x: len([w for w in x.lower().split() if w in stopwords.words('english')])
+        )
+        print("✓ Created features: char_count, word_count, avg_word_length, stopword_count")
+        print(f"\nFeature Statistics:")
+        print(self.df[['char_count', 'word_count', 'avg_word_length', 'stopword_count']].describe())
+        return self.df
+
+
+class TextPreprocessor:
+    def _init_(self):
+        self.lemmatizer = WordNetLemmatizer()
+        self.stop_words = set(stopwords.words('english'))
+        
+    def clean_text(self, text):
+        text = str(text)
+        text = text.lower()
+        text = re.sub(r'http\S+|www\S+|https\S+', '', text)
+        text = re.sub(r'\S+@\S+', '', text)
+        text = re.sub(r'[^a-zA-Z\s]', '', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+    
+    def tokenize_and_lemmatize(self, text):
+        tokens = word_tokenize(text)
+        tokens = [self.lemmatizer.lemmatize(token) for token in tokens if token not in self.stop_words and len(token) > 2]
+        return ' '.join(tokens)
+    
+    def preprocess(self, df, text_column='Consumer complaint narrative'):
+        print("\n" + "=" * 80)
+        print("TEXT PREPROCESSING")
+        print("=" * 80)
+        print("Step 1: Cleaning text...")
+        df['cleaned_text'] = df[text_column].apply(self.clean_text)
+        print("Step 2: Tokenizing and lemmatizing...")
+        df['processed_text'] = df['cleaned_text'].apply(self.tokenize_and_lemmatize)
+        df = df[df['processed_text'].str.len() > 0]
+        print(f"✓ Preprocessing complete. Final dataset shape: {df.shape}")
+        print(f"\nSample processed text:")
+        print(df['processed_text'].iloc[0][:200] + "...")
+        return df
+
+
+class MultiClassificationModel:
+    def _init_(self, X_train, X_test, y_train, y_test):
+        self.X_train = X_train
+        self.X_test = X_test
+        self.y_train = y_train
+        self.y_test = y_test
+        self.models = {}
+        self.results = {}
+        
+    def initialize_models(self):
+        print("\n" + "=" * 80)
+        print("INITIALIZING CLASSIFICATION MODELS")
+        print("=" * 80)
+        self.models = {
+            'Naive Bayes': MultinomialNB(),
+            'Logistic Regression': LogisticRegression(max_iter=1000, random_state=42),
+            'Linear SVM': LinearSVC(random_state=42, max_iter=2000),
+            'Random Forest': RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
+            'XGBoost': XGBClassifier(random_state=42, eval_metric='mlogloss')
+        }
+        print(f"✓ Initialized {len(self.models)} models:")
+        for name in self.models.keys():
+            print(f"  - {name}")
+        
+    def train_and_evaluate(self):
+        print("\n" + "=" * 80)
+        print("TRAINING AND EVALUATING MODELS")
+        print("=" * 80)
+        for name, model in self.models.items():
+            print(f"\n{'='*40}")
+            print(f"Training {name}...")
+            print(f"{'='*40}")
+            model.fit(self.X_train, self.y_train)
+            y_pred = model.predict(self.X_test)
+            accuracy = accuracy_score(self.y_test, y_pred)
+            precision = precision_score(self.y_test, y_pred, average='weighted')
+            recall = recall_score(self.y_test, y_pred, average='weighted')
+            f1 = f1_score(self.y_test, y_pred, average='weighted')
+            self.results[name] = {
+                'model': model,
+                'accuracy': accuracy,
+                'precision': precision,
+                'recall': recall,
+                'f1_score': f1,
+                'predictions': y_pred
+            }
+            print(f"Accuracy:  {accuracy:.4f}")
+            print(f"Precision: {precision:.4f}")
+            print(f"Recall:    {recall:.4f}")
+            print(f"F1-Score:  {f1:.4f}")
+        return self.results
+    
+    def compare_models(self):
+        print("\n" + "=" * 80)
+        print("MODEL PERFORMANCE COMPARISON")
+        print("=" * 80)
+        comparison_df = pd.DataFrame({
+            'Model': list(self.results.keys()),
+            'Accuracy': [r['accuracy'] for r in self.results.values()],
+            'Precision': [r['precision'] for r in self.results.values()],
+            'Recall': [r['recall'] for r in self.results.values()],
+            'F1-Score': [r['f1_score'] for r in self.results.values()]
+        })
+        comparison_df = comparison_df.sort_values('F1-Score', ascending=False)
+        print("\n", comparison_df.to_string(index=False))
+        fig, ax = plt.subplots(figsize=(12, 6))
+        x = np.arange(len(comparison_df))
+        width = 0.2
+        ax.bar(x - 1.5*width, comparison_df['Accuracy'], width, label='Accuracy')
+        ax.bar(x - 0.5*width, comparison_df['Precision'], width, label='Precision')
+        ax.bar(x + 0.5*width, comparison_df['Recall'], width, label='Recall')
+        ax.bar(x + 1.5*width, comparison_df['F1-Score'], width, label='F1-Score')
+        ax.set_xlabel('Models')
+        ax.set_ylabel('Scores')
+        ax.set_title('Model Performance Comparison')
+        ax.set_xticks(x)
+        ax.set_xticklabels(comparison_df['Model'], rotation=45, ha='right')
+        ax.legend()
+        ax.grid(axis='y', alpha=0.3)
+        plt.tight_layout()
+        plt.savefig('model_comparison.png', dpi=300, bbox_inches='tight')
+        return comparison_df
+
+
+class ModelEvaluator:
+    def _init_(self, model, X_test, y_test, y_pred, model_name):
+        self.model = model
+        self.X_test = X_test
+        self.y_test = y_test
+        self.y_pred = y_pred
+        self.model_name = model_name
+        
+    def detailed_evaluation(self):
+        print("\n" + "=" * 80)
+        print(f"DETAILED EVALUATION: {self.model_name}")
+        print("=" * 80)
+        print("\nClassification Report:")
+        print("-" * 80)
+        target_names = ['Credit Reporting', 'Debt Collection', 'Consumer Loan', 'Mortgage']
+        print(classification_report(self.y_test, self.y_pred, target_names=target_names))
+        cm = confusion_matrix(self.y_test, self.y_pred)
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=target_names, yticklabels=target_names)
+        plt.title(f'Confusion Matrix - {self.model_name}')
+        plt.ylabel('True Label')
+        plt.xlabel('Predicted Label')
+        plt.tight_layout()
+        plt.savefig(f'confusion_matrix_{self.model_name.replace(" ", "_")}.png', dpi=300, bbox_inches='tight')
+        print(f"\n✓ Confusion matrix saved")
+        print("\nPer-Class Performance:")
+        print("-" * 80)
+        for i, name in enumerate(target_names):
+            mask = self.y_test == i
+            if mask.sum() > 0:
+                acc = accuracy_score(self.y_test[mask], self.y_pred[mask])
+                print(f"{name:20s}: {acc:.4f}")
+
+
+class ComplaintPredictor:
+    def _init_(self, model, vectorizer, preprocessor):
+        self.model = model
+        self.vectorizer = vectorizer
+        self.preprocessor = preprocessor
+        self.category_names = {0: 'Credit Reporting', 1: 'Debt Collection', 2: 'Consumer Loan', 3: 'Mortgage'}
+    
+    def predict(self, complaint_text):
+        cleaned = self.preprocessor.clean_text(complaint_text)
+        processed = self.preprocessor.tokenize_and_lemmatize(cleaned)
+        vectorized = self.vectorizer.transform([processed])
+        prediction = self.model.predict(vectorized)[0]
+        probabilities = self.model.predict_proba(vectorized)[0] if hasattr(self.model, 'predict_proba') else None
+        return {'category_id': int(prediction), 'category_name': self.category_names[prediction], 'probabilities': probabilities}
+    
+    def predict_batch(self, complaint_texts):
+        results = []
+        for text in complaint_texts:
+            results.append(self.predict(text))
+        return results
+
+
+def main():
+    print("\n" + "=" * 80)
+    print("CONSUMER COMPLAINT TEXT CLASSIFICATION SYSTEM")
+    print("=" * 80)
+    analyzer = ComplaintDataAnalyzer('consumer_complaints.csv')
+    df = analyzer.load_and_prepare_data()
+    df = analyzer.filter_categories()
+    df = analyzer.perform_eda()
+    analyzer.create_wordclouds()
+    df = analyzer.engineer_features()
+    preprocessor = TextPreprocessor()
+    df = preprocessor.preprocess(df)
+    X = df['processed_text']
+    y = df['Category']
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    print(f"\nTrain set size: {len(X_train)}")
+    print(f"Test set size:  {len(X_test)}")
+    print("\nVectorizing text using TF-IDF...")
+    vectorizer = TfidfVectorizer(max_features=5000, ngram_range=(1, 2))
+    X_train_vec = vectorizer.fit_transform(X_train)
+    X_test_vec = vectorizer.transform(X_test)
+    print(f"✓ Feature matrix shape: {X_train_vec.shape}")
+    classifier = MultiClassificationModel(X_train_vec, X_test_vec, y_train, y_test)
+    classifier.initialize_models()
+    results = classifier.train_and_evaluate()
+    comparison_df = classifier.compare_models()
+    best_model_name = comparison_df.iloc[0]['Model']
+    best_model = results[best_model_name]['model']
+    best_predictions = results[best_model_name]['predictions']
+    print(f"\n🏆 Best Model: {best_model_name}")
+    print(f"   F1-Score: {results[best_model_name]['f1_score']:.4f}")
+    evaluator = ModelEvaluator(best_model, X_test_vec, y_test, best_predictions, best_model_name)
+    evaluator.detailed_evaluation()
+    predictor = ComplaintPredictor(best_model, vectorizer, preprocessor)
+    sample_complaints = [
+        "I have been trying to fix errors on my credit report for months but nothing has changed",
+        "A debt collector keeps calling me about a debt I don't owe",
+        "My car loan interest rate is much higher than what was promised",
+        "The mortgage company is not processing my payment correctly"
+    ]
+    print("\nExample Predictions:")
+    print("-" * 80)
+    for i, complaint in enumerate(sample_complaints, 1):
+        result = predictor.predict(complaint)
+        print(f"\nComplaint {i}: {complaint[:80]}...")
+        print(f"Predicted Category: {result['category_name']} (ID: {result['category_id']})")
+        if result['probabilities'] is not None:
+            print(f"Confidence: {max(result['probabilities']):.2%}")
+    print("\n" + "=" * 80)
+    print("PIPELINE COMPLETE!")
+    print("=" * 80)
+    print("\nGenerated Files:")
+    print("  ✓ category_distribution.png")
+    print("  ✓ wordcount_by_category.png")
+    print("  ✓ wordclouds.png")
+    print("  ✓ model_comparison.png")
+    print(f"  ✓ confusion_matrix_{best_model_name.replace(' ', '_')}.png")
+    return predictor, df, results
+
+
+if _name_ == "_main_":
+    predictor, df, results = main()
+    import pickle
+    with open('best_model.pkl', 'wb') as f:
+        pickle.dump(predictor, f)
+    print("\n✓ Best model saved as 'best_model.pkl'")
